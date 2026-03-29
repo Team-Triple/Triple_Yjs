@@ -12,8 +12,10 @@ const { LeveldbPersistence } = require("y-leveldb");
 const port = Number(process.env.PORT ?? 1234);
 const jwtSecret = process.env.JWT_SECRET;
 const travelDocPrefix = "travel-doc";
+const maxUsersPerDoc = Number(process.env.MAX_USERS_PER_DOC ?? 20);
 const yLeveldbPath = resolve(process.env.Y_LEVELDB_PATH ?? ".data/y-leveldb");
 const userSessions = new Map();
+const roomParticipants = new Map();
 
 await mkdir(yLeveldbPath, { recursive: true });
 
@@ -80,7 +82,9 @@ function rejectUpgrade(socket, statusCode, message) {
       ? "Bad Request"
       : statusCode === 401
         ? "Unauthorized"
-        : "Internal Server Error";
+        : statusCode === 403
+          ? "Forbidden"
+          : "Internal Server Error";
   const body = `${message}\n`;
   socket.write(
     `HTTP/1.1 ${statusCode} ${statusText}\r\n` +
@@ -90,6 +94,48 @@ function rejectUpgrade(socket, statusCode, message) {
       `\r\n${body}`
   );
   socket.destroy();
+}
+
+function canJoinRoom(docName, userId) {
+  const participants = roomParticipants.get(docName);
+  if (!participants) {
+    return true;
+  }
+  if (participants.has(userId)) {
+    return true;
+  }
+  return participants.size < maxUsersPerDoc;
+}
+
+function addRoomParticipant(docName, userId) {
+  if (!roomParticipants.has(docName)) {
+    roomParticipants.set(docName, new Map());
+  }
+  const participants = roomParticipants.get(docName);
+  const currentCount = participants.get(userId) ?? 0;
+  participants.set(userId, currentCount + 1);
+}
+
+function removeRoomParticipant(docName, userId) {
+  const participants = roomParticipants.get(docName);
+  if (!participants) {
+    return;
+  }
+
+  const currentCount = participants.get(userId);
+  if (currentCount === undefined) {
+    return;
+  }
+
+  if (currentCount <= 1) {
+    participants.delete(userId);
+  } else {
+    participants.set(userId, currentCount - 1);
+  }
+
+  if (participants.size === 0) {
+    roomParticipants.delete(docName);
+  }
 }
 
 function authenticateUpgrade(req) {
@@ -153,6 +199,16 @@ server.on("upgrade", (req, socket, head) => {
     return;
   }
 
+  const { docName, userId } = authResult.session;
+  if (!canJoinRoom(docName, userId)) {
+    rejectUpgrade(
+      socket,
+      403,
+      `Room user limit exceeded (max ${maxUsersPerDoc} users per document)`
+    );
+    return;
+  }
+
   req.session = authResult.session;
   wss.handleUpgrade(req, socket, head, ws => {
     wss.emit("connection", ws, req);
@@ -165,9 +221,10 @@ wss.on("connection", (ws, req) => {
     ws.close(1011, "session missing");
     return;
   }
-  const { userId, travelItineraryId, docName } = session;
+  const { userId, docName } = session;
 
   ws.session = session;
+  addRoomParticipant(docName, userId);
 
   if (!userSessions.has(userId)) {
     userSessions.set(userId, new Set());
@@ -185,6 +242,7 @@ wss.on("connection", (ws, req) => {
         userSessions.delete(userId);
       }
     }
+    removeRoomParticipant(docName, userId);
     console.log(`CLIENT::DISCONNECTED userId=${userId} room=${docName}`);
   });
 });
