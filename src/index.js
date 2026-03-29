@@ -1,14 +1,40 @@
 import { createServer } from "node:http";
+import { mkdir } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { resolve } from "node:path";
 import { WebSocketServer } from "ws";
 
 const require = createRequire(import.meta.url);
 const utils = require("y-websocket/bin/utils");
 const jwt = require("jsonwebtoken");
+const Y = require("yjs");
+const { LeveldbPersistence } = require("y-leveldb");
 const port = Number(process.env.PORT ?? 1234);
 const jwtSecret = process.env.JWT_SECRET;
 const travelDocPrefix = "travel-doc";
+const yLeveldbPath = resolve(process.env.Y_LEVELDB_PATH ?? ".data/y-leveldb");
 const userSessions = new Map();
+
+await mkdir(yLeveldbPath, { recursive: true });
+
+const ldb = new LeveldbPersistence(yLeveldbPath);
+utils.setPersistence({
+  provider: ldb,
+  bindState: async (docName, ydoc) => {
+    const persistedYdoc = await ldb.getYDoc(docName);
+    const newUpdates = Y.encodeStateAsUpdate(ydoc);
+
+    if (newUpdates.byteLength > 0) {
+      await ldb.storeUpdate(docName, newUpdates);
+    }
+
+    Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(persistedYdoc));
+    ydoc.on("update", update => {
+      void ldb.storeUpdate(docName, update);
+    });
+  },
+  writeState: async () => {}
+});
 
 function getRequestUrl(req) {
   const host = req.headers.host ?? `localhost:${port}`;
@@ -165,6 +191,7 @@ wss.on("connection", (ws, req) => {
 
 server.listen(port, () => {
   console.log(`Yjs WebSocket server listening on ws://localhost:${port}`);
+  console.log(`Y-LevelDB path: ${yLeveldbPath}`);
   console.log(
     `Connect format: ws://localhost:${port}/travel-doc/{travelItineraryId}?token={jwt}`
   );
