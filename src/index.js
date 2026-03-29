@@ -1,18 +1,19 @@
-import http from "node:http";
+import { createRequire } from "node:module";
+import { WebSocketServer } from "ws";
 
-const port = process.env.PORT ?? 3000;
+const require = createRequire(import.meta.url);
+const utils = require("y-websocket/bin/utils");
+const port = Number(process.env.PORT ?? 1234);
 
-const server = http.createServer((req, res) => {
-  res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-  res.end(
-    JSON.stringify({
-      ok: true,
-      message: "Node.js starter is running",
-      path: req.url
-    })
-  );
+const wss = new WebSocketServer({ port });
+
+wss.on("connection", (ws, req) => {
+  // Connect the client to Yjs docs using req.url as the room path.
+  utils.setupWSConnection(ws, req);
+
+  console.log("CLIENT::CONNECTED", req.url);
+  ws.on("message", message => console.log("CLIENT::MESSAGE", message.toString()));
+  ws.on("close", () => console.log("CLIENT::DISCONNECTED", req.url));
 });
 
-server.listen(port, () => {
-  console.log(`Server listening on http://localhost:${port}`);
-});
+console.log(`Yjs WebSocket server listening on ws://localhost:${port}`);
