@@ -1,0 +1,16 @@
+services:
+  yjs:
+    build: .
+    image: ${IMAGE_NAME:-ghcr.io/example/triple-yjs}:${IMAGE_TAG:-main}
+    ports:
+      - "8080:8080"
+    environment:
+      JWT_SECRET: ${JWT_SECRET:-dev-secret}
+      PORT: 8080
+      Y_LEVELDB_PATH: /data/y-leveldb
+      MAX_USERS_PER_DOC: 20
+    volumes:
+      - yjs-data:/data
+
+volumes:
+  yjs-data:
