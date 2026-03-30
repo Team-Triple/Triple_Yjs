@@ -50,6 +50,9 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch_name || github.event.workflow_run.head_sha }}
 
       - name: Set deploy vars
+        env:
+          GHCR_IMAGE_SECRET: ${{ secrets.GHCR_IMAGE }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           mkdir -p ~/.ssh
 
@@ -66,7 +69,13 @@ jobs:
 
           echo "BRANCH_NAME=${BRANCH_NAME}" >> "$GITHUB_ENV"
           echo "IMAGE_TAG=${IMAGE_TAG}" >> "$GITHUB_ENV"
-          echo "IMAGE_NAME=${{ secrets.GHCR_IMAGE }}" >> "$GITHUB_ENV"
+
+          if [ -n "${GHCR_IMAGE_SECRET}" ]; then
+            IMAGE_NAME="${GHCR_IMAGE_SECRET}"
+          else
+            IMAGE_NAME="ghcr.io/$(echo "${REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+          fi
+          echo "IMAGE_NAME=${IMAGE_NAME}" >> "$GITHUB_ENV"
 
           if [ "${BRANCH_NAME}" = "develop" ]; then
             echo "${{ secrets.EC2_SSH_KEY_DEV }}" > ~/.ssh/deploy_key.pem
