@@ -1,0 +1,114 @@
+name: CD
+
+on:
+  workflow_run:
+    workflows: ["Build and Push"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      branch_name:
+        description: "Deploy branch"
+        required: true
+        type: choice
+        options:
+          - develop
+          - main
+      image_tag:
+        description: "Image tag to deploy (default: branch tag)"
+        required: false
+        type: string
+
+concurrency:
+  group: deploy-${{ github.event.workflow_run.head_branch || github.event.inputs.branch_name || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        contains(fromJson('["develop","main"]'), github.event.workflow_run.head_branch)
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    steps:
+      - name: Debug trigger context
+        run: |
+          echo "event_name=${{ github.event_name }}"
+          echo "workflow_run.conclusion=${{ github.event.workflow_run.conclusion }}"
+          echo "workflow_run.head_branch=${{ github.event.workflow_run.head_branch }}"
+          echo "workflow_run.head_sha=${{ github.event.workflow_run.head_sha }}"
+
+      - name: Checkout deploy ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch_name || github.event.workflow_run.head_sha }}
+
+      - name: Set deploy vars
+        run: |
+          mkdir -p ~/.ssh
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            BRANCH_NAME="${{ github.event.inputs.branch_name }}"
+            IMAGE_TAG="${{ github.event.inputs.image_tag }}"
+            if [ -z "${IMAGE_TAG}" ]; then
+              IMAGE_TAG="${BRANCH_NAME}"
+            fi
+          else
+            BRANCH_NAME="${{ github.event.workflow_run.head_branch }}"
+            IMAGE_TAG="${{ github.event.workflow_run.head_sha }}"
+          fi
+
+          echo "BRANCH_NAME=${BRANCH_NAME}" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> "$GITHUB_ENV"
+          echo "IMAGE_NAME=${{ secrets.GHCR_IMAGE }}" >> "$GITHUB_ENV"
+
+          if [ "${BRANCH_NAME}" = "develop" ]; then
+            echo "${{ secrets.EC2_SSH_KEY_DEV }}" > ~/.ssh/deploy_key.pem
+            echo "TARGET_HOST=${{ secrets.DEV_HOST }}" >> "$GITHUB_ENV"
+          elif [ "${BRANCH_NAME}" = "main" ]; then
+            echo "${{ secrets.EC2_SSH_KEY_PROD }}" > ~/.ssh/deploy_key.pem
+            echo "TARGET_HOST=${{ secrets.PROD_HOST }}" >> "$GITHUB_ENV"
+          else
+            echo "Unsupported branch for deploy: ${BRANCH_NAME}"
+            exit 1
+          fi
+
+          chmod 600 ~/.ssh/deploy_key.pem
+
+      - name: Write .env
+        run: |
+          if [ "${BRANCH_NAME}" = "develop" ]; then
+            printf "%s" "${{ secrets.ENV_DEV }}" > .env
+          else
+            printf "%s" "${{ secrets.ENV_PROD }}" > .env
+          fi
+
+      - name: Upload files
+        env:
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          DEPLOY_PATH="${DEPLOY_PATH:-/home/ubuntu/deploy}"
+          ssh -i ~/.ssh/deploy_key.pem -o StrictHostKeyChecking=no ubuntu@"${TARGET_HOST}" "mkdir -p ${DEPLOY_PATH}"
+          scp -i ~/.ssh/deploy_key.pem -o StrictHostKeyChecking=no .env ubuntu@"${TARGET_HOST}":"${DEPLOY_PATH}"/.env
+          scp -i ~/.ssh/deploy_key.pem -o StrictHostKeyChecking=no docker-compose.yml ubuntu@"${TARGET_HOST}":"${DEPLOY_PATH}"/docker-compose.yml
+          ssh -i ~/.ssh/deploy_key.pem -o StrictHostKeyChecking=no ubuntu@"${TARGET_HOST}" "chmod 600 ${DEPLOY_PATH}/.env"
+
+      - name: Deploy
+        env:
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          DEPLOY_PATH="${DEPLOY_PATH:-/home/ubuntu/deploy}"
+
+          ssh -i ~/.ssh/deploy_key.pem -o StrictHostKeyChecking=no ubuntu@"${TARGET_HOST}" "
+            set -e
+            cd ${DEPLOY_PATH}
+            docker pull ${IMAGE_NAME}:${IMAGE_TAG}
+            IMAGE_NAME=${IMAGE_NAME} IMAGE_TAG=${IMAGE_TAG} docker compose up -d --remove-orphans
+            docker image prune -f || true
+          "
