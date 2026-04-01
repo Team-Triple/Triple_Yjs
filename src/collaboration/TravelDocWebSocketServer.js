@@ -212,13 +212,12 @@ export class TravelDocWebSocketServer {
     }
 
     const body = `${message}\n`;
-    socket.write(
+    socket.end(
       `HTTP/1.1 ${statusCode} ${statusText}\r\n` +
         "Connection: close\r\n" +
         "Content-Type: text/plain; charset=utf-8\r\n" +
         `Content-Length: ${Buffer.byteLength(body)}\r\n` +
         `\r\n${body}`
     );
-    socket.destroy();
   }
 }
