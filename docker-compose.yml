@@ -1,16 +1,18 @@
 services:
-  yjs:
-    build: .
-    image: ${IMAGE_NAME:-ghcr.io/example/triple-yjs}:${IMAGE_TAG:-main}
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
     ports:
-      - "8080:8080"
+      - "1234:1234"
     environment:
-      JWT_SECRET: ${JWT_SECRET}
-      PORT: 8080
-      Y_LEVELDB_PATH: /data/y-leveldb
-      MAX_USERS_PER_DOC: 20
+      PORT: "1234"
+      SECONDARY_JWT_SECRET: "change-me"
+      Y_LEVELDB_PATH: "/data/y-leveldb"
+      MAX_USERS_PER_ROOM: "20"
     volumes:
       - yjs-data:/data
+    restart: unless-stopped
 
 volumes:
   yjs-data:
