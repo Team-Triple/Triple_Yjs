@@ -31,6 +31,10 @@ export class TravelDocWebSocketServer {
       );
       return;
     }
+    if (!this.authenticator.consumeSecondaryToken(authResult.secondaryToken)) {
+      this.rejectUpgrade(socket, 401, "Secondary token already used");
+      return;
+    }
 
     req.session = authResult.session;
     this.wss.handleUpgrade(req, socket, head, ws => {

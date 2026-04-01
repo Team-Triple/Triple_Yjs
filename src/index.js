@@ -37,6 +37,8 @@ travelDocWebSocketServer.start();
 
 server.listen(port, () => {
   console.log(`HTTP server listening on http://localhost:${port}`);
-  console.log(`WebSocket server listening on ws://localhost:${port}?st={secondaryToken}`);
+  console.log(
+    `WebSocket server listening on ws://localhost:${port}?secondaryToken=Bearer%20{jwt}&travelItineraryId={travelItineraryId}`
+  );
   console.log(`Y-LevelDB path: ${yLeveldbPath}`);
 });
