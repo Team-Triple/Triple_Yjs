@@ -8,6 +8,7 @@ export class TravelDocWebSocketServer {
 
     this.userSessions = new Map();
     this.roomParticipants = new Map();
+    this.pendingRoomParticipants = new Map();
   }
 
   start() {
@@ -23,7 +24,8 @@ export class TravelDocWebSocketServer {
     }
 
     const { travelDocId, userId } = authResult.session;
-    if (!this.canJoinRoom(travelDocId, userId)) {
+    const reservationResult = this.reserveRoomSlot(travelDocId, userId);
+    if (!reservationResult.ok) {
       this.rejectUpgrade(
         socket,
         403,
@@ -32,14 +34,47 @@ export class TravelDocWebSocketServer {
       return;
     }
     if (!this.authenticator.consumeSecondaryToken(authResult.secondaryToken)) {
+      if (reservationResult.reserved) {
+        this.releaseReservedRoomSlot(travelDocId, userId);
+      }
       this.rejectUpgrade(socket, 401, "Secondary token already used");
       return;
     }
 
-    req.session = authResult.session;
-    this.wss.handleUpgrade(req, socket, head, ws => {
-      this.wss.emit("connection", ws, req);
-    });
+    let reservationSettled = false;
+    const rollbackReservation = () => {
+      if (reservationSettled || !reservationResult.reserved) {
+        return;
+      }
+      reservationSettled = true;
+      this.releaseReservedRoomSlot(travelDocId, userId);
+    };
+    const finalizeReservation = () => {
+      if (reservationSettled) {
+        return;
+      }
+      reservationSettled = true;
+      socket.off("close", rollbackReservation);
+      socket.off("error", rollbackReservation);
+    };
+    if (reservationResult.reserved) {
+      socket.once("close", rollbackReservation);
+      socket.once("error", rollbackReservation);
+    }
+
+    req.session = {
+      ...authResult.session,
+      hasReservedRoomSlot: reservationResult.reserved
+    };
+    try {
+      this.wss.handleUpgrade(req, socket, head, ws => {
+        finalizeReservation();
+        this.wss.emit("connection", ws, req);
+      });
+    } catch {
+      rollbackReservation();
+      this.rejectUpgrade(socket, 500, "WebSocket handshake failed");
+    }
   }
 
   handleConnection(ws, req) {
@@ -49,7 +84,10 @@ export class TravelDocWebSocketServer {
       return;
     }
 
-    const { userId, travelDocId } = session;
+    const { userId, travelDocId, hasReservedRoomSlot } = session;
+    if (hasReservedRoomSlot) {
+      this.releaseReservedRoomSlot(travelDocId, userId);
+    }
     this.addRoomParticipant(travelDocId, userId);
     this.addUserSession(userId, ws);
     this.yWebSocketHandler.handleConnection(ws, req, session);
@@ -60,15 +98,56 @@ export class TravelDocWebSocketServer {
     });
   }
 
-  canJoinRoom(travelDocId, userId) {
+  reserveRoomSlot(travelDocId, userId) {
     const participants = this.roomParticipants.get(travelDocId);
-    if (!participants) {
-      return true;
+    if (participants?.has(userId)) {
+      return { ok: true, reserved: false };
     }
-    if (participants.has(userId)) {
-      return true;
+
+    if (!this.pendingRoomParticipants.has(travelDocId)) {
+      this.pendingRoomParticipants.set(travelDocId, new Map());
     }
-    return participants.size < this.maxUsersPerRoom;
+    const pendingParticipants = this.pendingRoomParticipants.get(travelDocId);
+
+    const pendingCountForUser = pendingParticipants.get(userId);
+    if (pendingCountForUser !== undefined) {
+      pendingParticipants.set(userId, pendingCountForUser + 1);
+      return { ok: true, reserved: true };
+    }
+
+    const activeUsers = participants?.size ?? 0;
+    const pendingUsers = pendingParticipants.size;
+    if (activeUsers + pendingUsers >= this.maxUsersPerRoom) {
+      if (pendingParticipants.size === 0) {
+        this.pendingRoomParticipants.delete(travelDocId);
+      }
+      return { ok: false };
+    }
+
+    pendingParticipants.set(userId, 1);
+    return { ok: true, reserved: true };
+  }
+
+  releaseReservedRoomSlot(travelDocId, userId) {
+    const pendingParticipants = this.pendingRoomParticipants.get(travelDocId);
+    if (!pendingParticipants) {
+      return;
+    }
+
+    const count = pendingParticipants.get(userId);
+    if (count === undefined) {
+      return;
+    }
+
+    if (count <= 1) {
+      pendingParticipants.delete(userId);
+    } else {
+      pendingParticipants.set(userId, count - 1);
+    }
+
+    if (pendingParticipants.size === 0) {
+      this.pendingRoomParticipants.delete(travelDocId);
+    }
   }
 
   addRoomParticipant(travelDocId, userId) {
