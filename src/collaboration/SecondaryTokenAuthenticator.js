@@ -40,17 +40,24 @@ export class SecondaryTokenAuthenticator {
       };
     }
 
-    const rawTravelDocId = this.extractTravelDocId(req);
-    if (!rawTravelDocId) {
+    const rawTravelDocId = payload?.travelItineraryId;
+    if (typeof rawTravelDocId !== "string" && typeof rawTravelDocId !== "number") {
       return {
         ok: false,
-        statusCode: 400,
-        message: "Missing travelItineraryId query parameter"
+        statusCode: 401,
+        message: "Secondary token must include travelItineraryId"
       };
     }
 
     const userId = String(rawUserId);
-    const travelDocId = rawTravelDocId;
+    const travelDocId = String(rawTravelDocId).trim();
+    if (!travelDocId) {
+      return {
+        ok: false,
+        statusCode: 401,
+        message: "Secondary token must include travelItineraryId"
+      };
+    }
 
     return {
       ok: true,
@@ -81,20 +88,6 @@ export class SecondaryTokenAuthenticator {
     }
 
     return { ok: true, token };
-  }
-
-  extractTravelDocId(req) {
-    const travelItineraryId = this.getRequestUrl(req).searchParams.get("travelItineraryId");
-    if (!travelItineraryId) {
-      return null;
-    }
-
-    const normalizedTravelItineraryId = travelItineraryId.trim();
-    if (!normalizedTravelItineraryId) {
-      return null;
-    }
-
-    return normalizedTravelItineraryId;
   }
 
   isSecondaryTokenUsed(token) {
