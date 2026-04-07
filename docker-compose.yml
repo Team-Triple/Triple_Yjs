@@ -3,9 +3,10 @@ services:
     image: ${IMAGE_NAME:-ghcr.io/team-triple/triple_yjs}:${IMAGE_TAG:-develop}
     ports:
       - "1234:1234"
+    env_file:
+      - .env
     environment:
       PORT: "1234"
-      SECONDARY_JWT_SECRET: "change-me"
       Y_LEVELDB_PATH: "/data/y-leveldb"
       MAX_USERS_PER_ROOM: "20"
     volumes:

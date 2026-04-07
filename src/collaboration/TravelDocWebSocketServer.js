@@ -14,18 +14,40 @@ export class TravelDocWebSocketServer {
   start() {
     this.server.on("upgrade", this.handleUpgrade.bind(this));
     this.wss.on("connection", this.handleConnection.bind(this));
+    console.log(
+      `[ws] upgrade handler ready maxUsersPerRoom=${this.maxUsersPerRoom}`
+    );
   }
 
   handleUpgrade(req, socket, head) {
+    const requestLog = this.getRequestLogContext(req, socket);
+    console.log(
+      `[ws upgrade] received url=${requestLog.url} remote=${requestLog.remoteAddress} host=${requestLog.host}`
+    );
+
     const authResult = this.authenticator.authenticateUpgrade(req);
     if (!authResult.ok) {
+      console.warn(
+        `[ws upgrade] auth rejected status=${authResult.statusCode} message="${authResult.message}" url=${requestLog.url} remote=${requestLog.remoteAddress}`
+      );
       this.rejectUpgrade(socket, authResult.statusCode, authResult.message);
       return;
     }
 
     const { travelDocId, userId } = authResult.session;
+    console.log(
+      `[ws upgrade] auth accepted userId=${userId} travelDocId=${travelDocId} url=${requestLog.url}`
+    );
+
     const reservationResult = this.reserveRoomSlot(travelDocId, userId);
+    console.log(
+      `[ws upgrade] room reservation result ok=${reservationResult.ok} reserved=${reservationResult.reserved ?? false} userId=${userId} travelDocId=${travelDocId} activeUsers=${this.getRoomUserCount(travelDocId)} pendingUsers=${this.getPendingRoomUserCount(travelDocId)}`
+    );
+
     if (!reservationResult.ok) {
+      console.warn(
+        `[ws upgrade] room rejected maxUsersPerRoom=${this.maxUsersPerRoom} userId=${userId} travelDocId=${travelDocId}`
+      );
       this.rejectUpgrade(
         socket,
         403,
@@ -37,9 +59,15 @@ export class TravelDocWebSocketServer {
       if (reservationResult.reserved) {
         this.releaseReservedRoomSlot(travelDocId, userId);
       }
+      console.warn(
+        `[ws upgrade] secondary token rejected as already used userId=${userId} travelDocId=${travelDocId}`
+      );
       this.rejectUpgrade(socket, 401, "Secondary token already used");
       return;
     }
+    console.log(
+      `[ws upgrade] secondary token consumed userId=${userId} travelDocId=${travelDocId}`
+    );
 
     let reservationSettled = false;
     const rollbackReservation = () => {
@@ -48,6 +76,9 @@ export class TravelDocWebSocketServer {
       }
       reservationSettled = true;
       this.releaseReservedRoomSlot(travelDocId, userId);
+      console.warn(
+        `[ws upgrade] room reservation rolled back userId=${userId} travelDocId=${travelDocId} activeUsers=${this.getRoomUserCount(travelDocId)} pendingUsers=${this.getPendingRoomUserCount(travelDocId)}`
+      );
     };
     const finalizeReservation = () => {
       if (reservationSettled) {
@@ -69,10 +100,16 @@ export class TravelDocWebSocketServer {
     try {
       this.wss.handleUpgrade(req, socket, head, ws => {
         finalizeReservation();
+        console.log(
+          `[ws upgrade] handshake accepted userId=${userId} travelDocId=${travelDocId} url=${requestLog.url}`
+        );
         this.wss.emit("connection", ws, req);
       });
-    } catch {
+    } catch (error) {
       rollbackReservation();
+      console.error(
+        `[ws upgrade] handshake failed userId=${userId} travelDocId=${travelDocId} error=${error?.message ?? error}`
+      );
       this.rejectUpgrade(socket, 500, "WebSocket handshake failed");
     }
   }
@@ -80,6 +117,7 @@ export class TravelDocWebSocketServer {
   handleConnection(ws, req) {
     const session = req.session;
     if (!session) {
+      console.error("[ws connection] rejected because session is missing");
       ws.close(1011, "session missing");
       return;
     }
@@ -90,11 +128,23 @@ export class TravelDocWebSocketServer {
     }
     this.addRoomParticipant(travelDocId, userId);
     this.addUserSession(userId, ws);
+    console.log(
+      `[ws connection] connected userId=${userId} travelDocId=${travelDocId} userSessions=${this.getUserSessionCount(userId)} activeUsers=${this.getRoomUserCount(travelDocId)}`
+    );
     this.yWebSocketHandler.handleConnection(ws, req, session);
 
-    ws.on("close", () => {
+    ws.on("close", (code, reason) => {
       this.removeUserSession(userId, ws);
       this.removeRoomParticipant(travelDocId, userId);
+      console.log(
+        `[ws connection] closed userId=${userId} travelDocId=${travelDocId} code=${code} reason="${reason.toString()}" userSessions=${this.getUserSessionCount(userId)} activeUsers=${this.getRoomUserCount(travelDocId)}`
+      );
+    });
+
+    ws.on("error", error => {
+      console.error(
+        `[ws connection] error userId=${userId} travelDocId=${travelDocId} error=${error?.message ?? error}`
+      );
     });
   }
 
@@ -201,7 +251,43 @@ export class TravelDocWebSocketServer {
     }
   }
 
+  getRoomUserCount(travelDocId) {
+    return this.roomParticipants.get(travelDocId)?.size ?? 0;
+  }
+
+  getPendingRoomUserCount(travelDocId) {
+    return this.pendingRoomParticipants.get(travelDocId)?.size ?? 0;
+  }
+
+  getUserSessionCount(userId) {
+    return this.userSessions.get(userId)?.size ?? 0;
+  }
+
+  getRequestLogContext(req, socket) {
+    return {
+      url: this.sanitizeRequestUrl(req),
+      host: req.headers.host ?? "-",
+      remoteAddress:
+        req.headers["x-forwarded-for"] ?? socket.remoteAddress ?? "-"
+    };
+  }
+
+  sanitizeRequestUrl(req) {
+    const host = req.headers.host ?? "localhost";
+    try {
+      const url = new URL(req.url ?? "/", `http://${host}`);
+      if (url.searchParams.has("secondaryToken")) {
+        url.searchParams.set("secondaryToken", "[redacted]");
+      }
+      return `${url.pathname}${url.search}`;
+    } catch {
+      return req.url ?? "/";
+    }
+  }
+
   rejectUpgrade(socket, statusCode, message) {
+    console.warn(`[ws upgrade] responding status=${statusCode} message="${message}"`);
+
     let statusText = "Internal Server Error";
     if (statusCode === 400) {
       statusText = "Bad Request";
